@@ -10,6 +10,8 @@ The loader unlinks itself from disk before exec. Nothing survives on disk once t
 
 - https://discord.gg/rootkits
 
+Blog post: https://matheuzsecurity.github.io/hacking/fileless-loader-bypassing-elastic-memfd/
+
 ## Requirements
 
 | | |
