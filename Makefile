@@ -14,7 +14,7 @@ demo: demo.c
 	$(CC) -O2 -static -o $@ $<
 
 bebop: bebop.c
-	$(CC) -static -nostdlib -o $@ $<
+	$(CC) -static -nostdlib -mno-sse -o $@ $<
 
 clean:
 	rm -f $(TARGET) demo bebop

